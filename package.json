@@ -1,0 +1,57 @@
+{
+  "name": "team-grass-tracker",
+  "displayName": "Team Grass Tracker",
+  "description": "Visual commit tracking for team algorithm problem solving competition",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "teamGrassTracker",
+          "title": "Team Grass Tracker",
+          "icon": "$(calendar)"
+        }
+      ]
+    },
+    "views": {
+      "teamGrassTracker": [
+        {
+          "id": "teamGrassTrackerView",
+          "name": "🌱 잔디 달력",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "teamGrassTracker.refresh",
+        "title": "🔄 Refresh Grass Calendar"
+      },
+      {
+        "command": "teamGrassTracker.show",
+        "title": "🌱 Show Team Grass Tracker"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "echo 'No build required'",
+    "compile": "echo 'No build required'",
+    "watch": "echo 'No build required'"
+  },
+  "devDependencies": {
+    "@types/node": "16.x",
+    "@types/vscode": "^1.74.0",
+    "typescript": "^4.9.4"
+  },
+  "dependencies": {
+    "@types/vscode": "^1.74.0"
+  }
+}
