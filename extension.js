@@ -1,167 +1,419 @@
 const vscode = require('vscode');
+const path = require('path');
+const fs = require('fs');
+const { execSync } = require('child_process');
 
-function activate(context) {
-    console.log('🌱 Team Grass Tracker extension is now active!');
+// Logger 클래스
+class Logger {
+    constructor(channelName) {
+        this.outputChannel = vscode.window.createOutputChannel(channelName);
+    }
     
-    // 웹뷰 프로바이더 등록
-    const provider = new GrassTrackerViewProvider(context.extensionUri);
-    context.subscriptions.push(
-        vscode.window.registerWebviewViewProvider('teamGrassTrackerView', provider)
-    );
-
-    // 새로고침 명령 등록
-    const refreshCommand = vscode.commands.registerCommand('teamGrassTracker.refresh', () => {
-        provider.refresh();
-        vscode.window.showInformationMessage('🌱 잔디 달력이 새로고침되었습니다!');
-    });
-    context.subscriptions.push(refreshCommand);
-
-    // 확장 표시 명령 등록
-    const showCommand = vscode.commands.registerCommand('teamGrassTracker.show', () => {
-        vscode.window.showInformationMessage('🌱 Team Grass Tracker가 활성화되었습니다! Explorer 사이드바를 확인하세요.');
-    });
-    context.subscriptions.push(showCommand);
+    info(message, ...args) {
+        this.log('INFO', message, args);
+    }
+    
+    warn(message, ...args) {
+        this.log('WARN', message, args);
+    }
+    
+    error(message, error) {
+        this.log('ERROR', message, error ? [error] : []);
+    }
+    
+    debug(message, ...args) {
+        this.log('DEBUG', message, args);
+    }
+    
+    log(level, message, args) {
+        const timestamp = new Date().toISOString();
+        const logMessage = `[${timestamp}] ${level}: ${message}`;
+        
+        this.outputChannel.appendLine(logMessage);
+        if (args.length > 0) {
+            this.outputChannel.appendLine(`  Args: ${JSON.stringify(args, null, 2)}`);
+        }
+        
+        console.log(logMessage, ...args);
+    }
+    
+    show() {
+        this.outputChannel.show();
+    }
+    
+    dispose() {
+        this.outputChannel.dispose();
+    }
 }
 
-function deactivate() {}
-
-class GrassTrackerViewProvider {
-    constructor(extensionUri) {
-        this._extensionUri = extensionUri;
+// Configuration Manager 클래스
+class ConfigurationManager {
+    constructor() {
+        this.CONFIG_SECTION = 'teamGrassTracker';
     }
-
-    resolveWebviewView(webviewView, context, _token) {
-        this._view = webviewView;
-
-        webviewView.webview.options = {
-            enableScripts: true,
-            localResourceRoots: [this._extensionUri]
-        };
-
-        webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
+    
+    get teamMembers() {
+        return vscode.workspace.getConfiguration(this.CONFIG_SECTION).get('teamMembers', []);
     }
+    
+    get targetRepository() {
+        return vscode.workspace.getConfiguration(this.CONFIG_SECTION).get('targetRepository', '');
+    }
+    
+    get teamTitle() {
+        return vscode.workspace.getConfiguration(this.CONFIG_SECTION).get('teamTitle', 'Team Grass Tracker');
+    }
+    
+    async addMember(member) {
+        const members = [...this.teamMembers, member];
+        await this.updateMembers(members);
+    }
+    
+    async updateMember(githubName, updates) {
+        const members = this.teamMembers.map(m => 
+            m.githubName === githubName ? { ...m, ...updates } : m
+        );
+        await this.updateMembers(members);
+    }
+    
+    async removeMember(githubName) {
+        const members = this.teamMembers.filter(m => m.githubName !== githubName);
+        await this.updateMembers(members);
+    }
+    
+    async setRepository(repoPath) {
+        await vscode.workspace.getConfiguration(this.CONFIG_SECTION)
+            .update('targetRepository', repoPath, vscode.ConfigurationTarget.Workspace);
+    }
+    
+    async updateMembers(members) {
+        await vscode.workspace.getConfiguration(this.CONFIG_SECTION)
+            .update('teamMembers', members, vscode.ConfigurationTarget.Workspace);
+    }
+}
 
-    refresh() {
-        if (this._view) {
-            this._view.webview.html = this._getHtmlForWebview(this._view.webview);
+// Git Service 클래스
+class GitService {
+    constructor(logger) {
+        this.logger = logger;
+    }
+    
+    async getCommitData(repoPath, author, year, month) {
+        if (!this.isValidRepository(repoPath)) {
+            throw new Error(`Invalid repository: ${repoPath}`);
+        }
+        
+        const startDate = `${year}-${month.toString().padStart(2, '0')}-01`;
+        const endDate = new Date(year, month, 0);
+        const endDateStr = `${year}-${month.toString().padStart(2, '0')}-${endDate.getDate().toString().padStart(2, '0')}`;
+        
+        try {
+            const command = `git log --author="${author}" --since="${startDate}" --until="${endDateStr}" --pretty=format:"%ad" --date=short`;
+            
+            const result = execSync(command, {
+                cwd: repoPath,
+                encoding: 'utf8',
+                stdio: ['pipe', 'pipe', 'ignore']
+            });
+            
+            return this.parseCommitData(result, year, month);
+        } catch (error) {
+            this.logger.error(`Failed to get commit data for ${author}`, error);
+            return this.getEmptyMonthData(year, month);
         }
     }
+    
+    async getRepositoryAuthors(repoPath) {
+        if (!this.isValidRepository(repoPath)) {
+            return [];
+        }
+        
+        try {
+            const command = 'git log --format="%an" --since="3 months ago"';
+            const result = execSync(command, {
+                cwd: repoPath,
+                encoding: 'utf8'
+            });
+            
+            return [...new Set(result.split('\n').filter(author => author.trim()))];
+        } catch (error) {
+            this.logger.error('Failed to get repository authors', error);
+            return [];
+        }
+    }
+    
+    isValidRepository(repoPath) {
+        return fs.existsSync(repoPath) && fs.existsSync(path.join(repoPath, '.git'));
+    }
+    
+    parseCommitData(gitOutput, year, month) {
+        const dates = gitOutput.split('\n').filter(line => line.trim());
+        const commitCounts = new Map();
+        
+        dates.forEach(date => {
+            const count = commitCounts.get(date) || 0;
+            commitCounts.set(date, count + 1);
+        });
+        
+        const daysInMonth = new Date(year, month, 0).getDate();
+        const result = [];
+        
+        for (let day = 1; day <= daysInMonth; day++) {
+            const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+            result.push({
+                date: dateStr,
+                count: commitCounts.get(dateStr) || 0
+            });
+        }
+        
+        return result;
+    }
+    
+    getEmptyMonthData(year, month) {
+        const daysInMonth = new Date(year, month, 0).getDate();
+        const result = [];
+        
+        for (let day = 1; day <= daysInMonth; day++) {
+            const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+            result.push({ date: dateStr, count: 0 });
+        }
+        
+        return result;
+    }
+}
 
-    _getHtmlForWebview(webview) {
+// Team Grass Provider 클래스
+class TeamGrassProvider {
+    constructor(extensionUri, configManager, gitService, logger) {
+        this.extensionUri = extensionUri;
+        this.configManager = configManager;
+        this.gitService = gitService;
+        this.logger = logger;
+        this.currentYear = new Date().getFullYear();
+        this.currentMonth = new Date().getMonth() + 1;
+    }
+    
+    resolveWebviewView(webviewView, context, token) {
+        this._view = webviewView;
+        
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this.extensionUri]
+        };
+        
+        this.updateWebview();
+        
+        webviewView.webview.onDidReceiveMessage(message => {
+            this.handleMessage(message);
+        });
+    }
+    
+    refresh() {
+        this.updateWebview();
+    }
+    
+    async addMember() {
+        const githubName = await vscode.window.showInputBox({
+            prompt: 'GitHub 사용자명을 입력하세요',
+            placeHolder: 'github-username'
+        });
+        
+        if (!githubName) return;
+        
+        const displayName = await vscode.window.showInputBox({
+            prompt: '표시할 이름을 입력하세요',
+            placeHolder: '홍길동',
+            value: githubName
+        });
+        
+        if (!displayName) return;
+        
+        const colorHue = Math.floor(Math.random() * 360);
+        
+        await this.configManager.addMember({
+            githubName,
+            displayName,
+            colorHue
+        });
+        
+        vscode.window.showInformationMessage(`✅ ${displayName}님이 팀에 추가되었습니다!`);
+        this.refresh();
+    }
+    
+    async selectRepository() {
+        const folders = await vscode.window.showOpenDialog({
+            canSelectFiles: false,
+            canSelectFolders: true,
+            canSelectMany: false,
+            openLabel: 'Git 저장소 선택'
+        });
+        
+        if (folders && folders.length > 0) {
+            const selectedPath = folders[0].fsPath;
+            await this.configManager.setRepository(selectedPath);
+            vscode.window.showInformationMessage(`저장소가 설정되었습니다: ${path.basename(selectedPath)}`);
+            this.refresh();
+        }
+    }
+    
+    async showAttendance() {
+        const members = this.configManager.teamMembers;
+        const repo = this.configManager.targetRepository;
+        
+        if (!repo || members.length === 0) {
+            vscode.window.showWarningMessage('저장소와 팀원을 먼저 설정해주세요.');
+            return;
+        }
+        
+        const today = new Date().toISOString().split('T')[0];
+        let report = `📋 ${today} 출석체크\n\n`;
+        
+        for (const member of members) {
+            try {
+                const commits = await this.gitService.getCommitData(repo, member.githubName, 
+                    new Date().getFullYear(), new Date().getMonth() + 1);
+                const todayCommits = commits.find(c => c.date === today)?.count || 0;
+                
+                report += `${todayCommits > 0 ? '✅' : '❌'} ${member.displayName}: ${todayCommits}회\n`;
+            } catch {
+                report += `⚠️ ${member.displayName}: 확인 실패\n`;
+            }
+        }
+        
+        vscode.window.showInformationMessage(report);
+    }
+    
+    async updateWebview() {
+        if (!this._view) return;
+        
+        const members = this.configManager.teamMembers;
+        const repo = this.configManager.targetRepository;
+        const title = this.configManager.teamTitle;
+        
+        const membersWithData = await Promise.all(
+            members.map(async member => ({
+                ...member,
+                commitData: await this.gitService.getCommitData(repo, member.githubName, this.currentYear, this.currentMonth)
+            }))
+        );
+        
+        this._view.webview.html = this.getHtmlForWebview(membersWithData, repo, title);
+    }
+    
+    handleMessage(message) {
+        switch (message.command) {
+            case 'updateColor':
+                this.configManager.updateMember(message.githubName, { colorHue: message.colorHue });
+                this.refresh();
+                break;
+            case 'changeMonth':
+                this.currentYear = message.year;
+                this.currentMonth = message.month;
+                this.updateWebview();
+                break;
+            case 'refresh':
+                this.refresh();
+                break;
+            case 'selectRepository':
+                this.selectRepository();
+                break;
+            case 'addMember':
+                this.addMember();
+                break;
+            case 'showAttendance':
+                this.showAttendance();
+                break;
+        }
+    }
+    
+    getHtmlForWebview(members, repo, title) {
+        const nonce = this.getNonce();
+        
         return `<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🌱 Team Grass Tracker</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
+    <title>${title}</title>
     <style>
         body {
             font-family: var(--vscode-font-family);
             color: var(--vscode-foreground);
-            background-color: var(--vscode-editor-background);
+            background: var(--vscode-editor-background);
             margin: 0;
-            padding: 8px;
-            font-size: 12px;
-            line-height: 1.4;
+            padding: 12px;
+            font-size: 13px;
         }
-
+        
         .header {
             text-align: center;
-            margin-bottom: 15px;
-            padding: 8px;
-            background-color: var(--vscode-editor-selectionBackground, #0366d625);
+            margin-bottom: 20px;
+            padding: 12px;
+            background: var(--vscode-editor-selectionBackground);
+            border-radius: 6px;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 6px 12px;
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
             border-radius: 4px;
-            border: 1px solid var(--vscode-panel-border, #e1e4e8);
+            cursor: pointer;
+            font-size: 12px;
         }
-
-        .header h2 {
-            margin: 0;
-            font-size: 16px;
-            color: var(--vscode-foreground);
+        
+        .btn:hover {
+            background: var(--vscode-button-hoverBackground);
         }
-
+        
         .month-nav {
             display: flex;
             justify-content: center;
             align-items: center;
-            gap: 10px;
-            margin-bottom: 15px;
+            gap: 12px;
+            margin: 16px 0;
         }
-
-        .month-nav button {
-            background-color: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            padding: 4px 8px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 11px;
-        }
-
-        .month-nav button:hover {
-            background-color: var(--vscode-button-hoverBackground);
-        }
-
-        .month-display {
-            font-weight: bold;
-            font-size: 13px;
-        }
-
-        .user-section {
+        
+        .member-card {
             margin-bottom: 20px;
-            padding: 10px;
-            border: 1px solid var(--vscode-panel-border, #e1e4e8);
+            padding: 12px;
+            border: 1px solid var(--vscode-panel-border);
             border-radius: 6px;
-            background-color: var(--vscode-editor-background);
-            width: 150px;
-            max-width: 150px;
-            box-sizing: border-box;
-            overflow: hidden;
+            background: var(--vscode-editor-background);
         }
-
-        .user-header {
+        
+        .member-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 8px;
+            margin-bottom: 12px;
         }
-
-        .user-name {
+        
+        .member-name {
             font-weight: bold;
-            font-size: 13px;
         }
-
-        .user-color-control {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            margin-bottom: 8px;
+        
+        .stats {
+            font-size: 11px;
+            color: var(--vscode-descriptionForeground);
         }
-
-        .user-color-control label {
-            font-size: 10px;
-            min-width: 25px;
-        }
-
-        .user-color-control input {
-            width: 60px;
-            height: 16px;
-        }
-
-        .color-preview {
-            width: 20px;
-            height: 16px;
-            border: 1px solid var(--vscode-panel-border);
-            border-radius: 2px;
-        }
-
-        .calendar-grid {
+        
+        .calendar {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
             gap: 2px;
-            margin-bottom: 10px;
+            margin: 12px 0;
         }
-
+        
         .calendar-header {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
@@ -171,383 +423,196 @@ class GrassTrackerViewProvider {
             text-align: center;
             color: var(--vscode-descriptionForeground);
         }
-
-        .cell {
-            width: 12px;
-            height: 12px;
-            border-radius: 2px;
-            background-color: var(--vscode-editor-background);
-            border: 1px solid var(--vscode-panel-border, #e1e4e8);
+        
+        .day {
+            width: 16px;
+            height: 16px;
+            border-radius: 3px;
+            border: 1px solid var(--vscode-panel-border);
             position: relative;
         }
-
-        .comment-section {
-            margin-top: 10px;
-            padding: 6px;
-            border-radius: 4px;
-            border: 1px solid var(--vscode-panel-border, #e1e4e8);
-            max-width: 100%;
-            box-sizing: border-box;
-        }
-
-        .comment-input {
+        
+        .color-control {
             display: flex;
-            gap: 3px;
-            margin-bottom: 6px;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
         }
-
-        .comment-input input {
+        
+        .color-slider {
             flex: 1;
-            padding: 3px 4px;
-            border: 1px solid var(--vscode-input-border);
-            border-radius: 3px;
-            background-color: var(--vscode-input-background);
-            color: var(--vscode-input-foreground);
-            font-size: 10px;
-            min-width: 0;
-            max-width: 80px;
         }
-
-        .comment-input button {
-            background-color: var(--vscode-button-background);
-            color: var(--vscode-button-foreground);
-            border: none;
-            padding: 3px 6px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 9px;
-            white-space: nowrap;
+        
+        .color-preview {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            border: 1px solid var(--vscode-panel-border);
         }
-
-        .comment-input button:hover {
-            background-color: var(--vscode-button-hoverBackground);
-        }
-
-        .comment-list {
-            max-height: 60px;
-            overflow-y: auto;
-            overflow-x: hidden;
-        }
-
-        .comment-item {
-            margin-bottom: 3px;
-            font-size: 9px;
-            padding: 3px;
-            border-radius: 3px;
-            border: 1px solid var(--vscode-panel-border, #e1e4e822);
-            word-wrap: break-word;
-            overflow-wrap: break-word;
-        }
-
-        .comment-author {
-            font-weight: bold;
-            color: var(--vscode-symbolIcon-functionForeground, #0366d6);
-        }
-
-        .days-header {
-            font-size: 9px;
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
             color: var(--vscode-descriptionForeground);
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <h2>🌱 Team Grass Tracker</h2>
-        <div class="subtitle">알고리즘 스터디 잔디 현황</div>
+        <h2>${title}</h2>
+        <div class="stats">📂 ${repo ? path.basename(repo) : '저장소 미설정'} • 👥 ${members.length}명</div>
     </div>
-
-    <!-- 월 네비게이션 -->
-    <div class="month-nav">
-        <button onclick="changeMonth(-1)">←</button>
-        <span class="month-display" id="monthDisplay">2025년 9월</span>
-        <button onclick="changeMonth(1)">→</button>
+    
+    <div class="controls">
+        <button class="btn" onclick="selectRepository()">📁 저장소 선택</button>
+        <button class="btn" onclick="addMember()">👥 팀원 추가</button>
+        <button class="btn" onclick="showAttendance()">📋 출석체크</button>
+        <button class="btn" onclick="refresh()">🔄 새로고침</button>
     </div>
-
-    <div id="usersContainer"></div>
-
-    <script>
-        // OKLAB 색상 변환 함수들
-        function oklab_to_linear_srgb(L, a, b) {
-            let l_ = L + 0.3963377774 * a + 0.2158037573 * b;
-            let m_ = L - 0.1055613458 * a - 0.0638541728 * b;
-            let s_ = L - 0.0894841775 * a - 1.2914855480 * b;
-            
-            let l = l_*l_*l_;
-            let m = m_*m_*m_;
-            let s = s_*s_*s_;
-            
-            return [
-                +4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-                -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-                -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
-            ];
-        }
-
-        function linear_srgb_to_rgb(r, g, b) {
-            function f(x) {
-                return x <= 0.0031308 ? 12.92 * x : 1.055 * Math.pow(x, 1/2.4) - 0.055;
-            }
-            return [f(r), f(g), f(b)];
-        }
-
-        function oklab_to_rgb(L, a, b) {
-            let [r_linear, g_linear, b_linear] = oklab_to_linear_srgb(L, a, b);
-            let [r, g, b_] = linear_srgb_to_rgb(r_linear, g_linear, b_linear);
-            
-            r = Math.max(0, Math.min(1, r));
-            g = Math.max(0, Math.min(1, g));
-            b_ = Math.max(0, Math.min(1, b_));
-            
-            return [Math.round(r * 255), Math.round(g * 255), Math.round(b_ * 255)];
-        }
-
-        function getGrassColor(colorPosition, intensity) {
-            if (intensity === 0) {
-                return 'var(--vscode-editor-background)';
-            }
-            
-            const normalizedPosition = colorPosition / 100;
-            const a = Math.cos(normalizedPosition * 2 * Math.PI) * 0.15;
-            const b = Math.sin(normalizedPosition * 2 * Math.PI) * 0.15;
-            
-            const L = 0.3 + (intensity * 0.2);
-            
-            const [r, g, b_] = oklab_to_rgb(L, a, b);
-            return \`rgb(\${r}, \${g}, \${b_})\`;
-        }
-
-        // 현재 표시 중인 년월
-        let currentYear = 2025;
-        let currentMonth = 9; // 9월 (0-based가 아님)
+    
+    ${members.length === 0 ? `
+        <div class="empty-state">
+            <h3>🌱 Team Grass Tracker</h3>
+            <p>팀원을 추가하고 저장소를 설정해주세요!</p>
+        </div>
+    ` : `
+        <div class="month-nav">
+            <button class="btn" onclick="changeMonth(-1)">←</button>
+            <span id="monthDisplay">${this.currentYear}년 ${this.currentMonth}월</span>
+            <button class="btn" onclick="changeMonth(1)">→</button>
+        </div>
         
-        // 댓글 시스템 (월별로 관리)
-        let comments = {
-            "2025-9": {
-                "kimcoding": [
-                    { author: "parkalgo", text: "야 너 왜 이렇게 잔디가 빈약해? 🌱", date: new Date('2025-09-01') },
-                    { author: "leedebug", text: "김코딩님 오늘도 화이팅! 💪", date: new Date('2025-09-05') }
-                ],
-                "parkalgo": [
-                    { author: "kimcoding", text: "파란색 잔디 이쁘네요 ㅋㅋ 👍", date: new Date('2025-09-03') },
-                    { author: "leedebug", text: "알고 형님... 존경합니다... 🙏", date: new Date('2025-09-07') }
-                ],
-                "leedebug": [
-                    { author: "kimcoding", text: "디버그는 진짜 열심히 하는구나 👨‍💻", date: new Date('2025-09-02') },
-                    { author: "parkalgo", text: "빨간 잔디 무서워요 ㅠㅠ 🔥", date: new Date('2025-09-08') }
-                ]
-            }
-        };
+        <div class="calendar-header">
+            <div>일</div><div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div>
+        </div>
         
-        // 샘플 사용자 데이터 (GitHub 이름 포함)
-        let users = [
-            {
-                githubName: 'kimcoding',
-                displayName: '김코딩',
-                colorPosition: 25, // 초록 계열
-            },
-            {
-                githubName: 'parkalgo',
-                displayName: '박알고',
-                colorPosition: 66, // 파랑 계열  
-            },
-            {
-                githubName: 'leedebug',
-                displayName: '이디버그',
-                colorPosition: 0, // 빨강 계열
-            },
-            {
-                githubName: 'choicode',
-                displayName: '최코드',
-                colorPosition: 83, // 보라 계열
-            }
-        ];
-
-        // 고정된 커밋 데이터 (색상 변경해도 안 바뀜)
-        const fixedCommitData = {
-            'kimcoding': {
-                '2025-9': [0,1,2,0,1,3,0,2,1,4,0,1,2,0,3,1,0,2,1,3,0,1,2,0,1,3,0,2,1,0],
-                '2025-8': [1,0,2,1,3,0,1,2,0,1,3,2,0,1,2,3,0,1,2,0,3,1,2,0,1,3,0,2,1,0,1],
-                '2025-10': [2,1,0,3,1,2,0,1,3,2,0,1,2,0,3,1,2,0,1,3,0,2,1,0,3,1,2,0,1,3,0]
-            },
-            'parkalgo': {
-                '2025-9': [3,2,4,1,3,2,5,1,3,2,4,0,3,2,1,4,3,2,1,3,2,4,1,3,2,0,4,3,2,1],
-                '2025-8': [2,4,3,2,1,4,3,2,5,1,3,2,4,1,3,2,0,4,3,2,1,3,4,2,1,3,2,4,1,3,2],
-                '2025-10': [4,3,2,1,4,3,2,5,1,4,3,2,1,4,3,2,0,4,3,2,1,4,3,2,1,4,3,2,1,4,3]
-            },
-            'leedebug': {
-                '2025-9': [2,3,1,4,2,3,0,4,2,3,1,4,2,0,3,1,4,2,3,1,4,2,0,3,1,4,2,3,1,4],
-                '2025-8': [3,2,4,1,3,2,0,4,3,2,1,4,3,2,1,4,3,0,2,4,3,2,1,4,3,2,1,4,3,2,1],
-                '2025-10': [4,2,3,1,4,2,3,0,4,2,3,1,4,2,3,1,4,2,0,3,4,2,3,1,4,2,3,1,4,2,3]
-            },
-            'choicode': {
-                '2025-9': [1,0,2,1,0,3,1,2,0,1,3,0,2,1,0,2,1,3,0,1,2,0,1,3,0,2,1,0,2,1],
-                '2025-8': [0,2,1,0,3,1,2,0,1,2,0,3,1,0,2,1,0,3,1,2,0,1,3,0,2,1,0,2,1,0,3],
-                '2025-10': [2,1,0,2,1,3,0,2,1,0,3,1,2,0,1,2,0,3,1,2,0,1,3,0,2,1,0,2,1,3,0]
-            }
-        };
-
-        // 고정된 커밋 데이터 가져오기
-        function getCommitData(githubName, year, month) {
-            const monthKey = \`\${year}-\${month}\`;
-            return fixedCommitData[githubName] && fixedCommitData[githubName][monthKey] 
-                ? fixedCommitData[githubName][monthKey] 
-                : Array.from({length: 30}, () => Math.floor(Math.random() * 3)); // 없으면 기본값
+        ${members.map(member => this.renderMember(member)).join('')}
+    `}
+    
+    <script nonce="${nonce}">
+        const vscode = acquireVsCodeApi();
+        
+        function selectRepository() {
+            vscode.postMessage({ command: 'selectRepository' });
         }
-
-        // 실제 Git 커밋 데이터 가져오기 (향후 구현)
-        async function getRealCommitData(githubName, year, month) {
-            try {
-                // VS Code API를 통해 현재 워크스페이스의 Git 저장소에서 커밋 데이터 가져오기
-                // 현재는 시뮬레이션 데이터 반환
-                return getCommitData(githubName, year, month);
-            } catch (error) {
-                console.log('Git 데이터를 가져올 수 없습니다:', error);
-                return getCommitData(githubName, year, month);
-            }
+        
+        function addMember() {
+            vscode.postMessage({ command: 'addMember' });
         }
-
-        // 월 변경 함수
+        
+        function showAttendance() {
+            vscode.postMessage({ command: 'showAttendance' });
+        }
+        
+        function refresh() {
+            vscode.postMessage({ command: 'refresh' });
+        }
+        
         function changeMonth(direction) {
-            currentMonth += direction;
-            if (currentMonth > 12) {
-                currentMonth = 1;
-                currentYear++;
-            } else if (currentMonth < 1) {
-                currentMonth = 12;
-                currentYear--;
+            let year = ${this.currentYear};
+            let month = ${this.currentMonth};
+            
+            month += direction;
+            if (month > 12) {
+                month = 1;
+                year++;
+            } else if (month < 1) {
+                month = 12;
+                year--;
             }
             
-            document.getElementById('monthDisplay').textContent = \`\${currentYear}년 \${currentMonth}월\`;
-            renderAllUsers();
+            document.getElementById('monthDisplay').textContent = year + '년 ' + month + '월';
+            vscode.postMessage({ command: 'changeMonth', year, month });
         }
-
-        // 사용자별 달력 렌더링
-        function renderUser(user) {
-            const commitData = getCommitData(user.githubName, currentYear, currentMonth);
-            const daysInMonth = new Date(currentYear, currentMonth, 0).getDate();
-            const firstDayOfMonth = new Date(currentYear, currentMonth - 1, 1).getDay();
-            
-            let html = \`
-                <div class="user-section">
-                    <div class="user-header">
-                        <span class="user-name">\${user.displayName} (@\${user.githubName})</span>
-                    </div>
-                    
-                    <div class="user-color-control">
-                        <label>색상:</label>
-                        <input type="range" min="0" max="100" value="\${user.colorPosition}" 
-                               onchange="updateUserColor('\${user.githubName}', this.value)">
-                        <div class="color-preview" style="background-color: \${getGrassColor(user.colorPosition, 0.5)}"></div>
-                    </div>
-                    
-                    <div class="calendar-header days-header">
-                        <div>일</div><div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div>
-                    </div>
-                    
-                    <div class="calendar-grid">\`;
-
-            // 빈 칸 추가 (월 시작 요일 맞추기)
-            for (let i = 0; i < firstDayOfMonth; i++) {
-                html += \`<div class="cell" style="visibility: hidden;"></div>\`;
-            }
-
-            // 날짜 칸들
-            for (let day = 1; day <= daysInMonth; day++) {
-                const commitCount = commitData[day - 1];
-                const intensity = commitCount > 0 ? Math.min(commitCount / 4, 1) : 0;
-                const color = getGrassColor(user.colorPosition, intensity);
-                
-                // 오늘 날짜 하이라이트
-                const today = new Date();
-                const isToday = (currentYear === today.getFullYear() && 
-                               currentMonth === (today.getMonth() + 1) && 
-                               day === today.getDate());
-                const isTodayCell = isToday;
-                
-                html += \`<div class="cell" style="background-color: \${color}; \${isTodayCell ? 'border: 2px solid #ffeb3b; box-shadow: 0 0 4px #ffeb3b;' : ''}" 
-                    title="\${day}일: \${commitCount}회\${isTodayCell ? ' (오늘)' : ''}"></div>\`;
-            }
-            
-            html += \`</div>
-                    <div class="comment-section" style="background-color: \${getGrassColor(user.colorPosition, 0.1)};">
-                        <div class="comment-input">
-                            <input type="text" placeholder="잔디 모욕하기..." maxlength="30" id="commentInput_\${user.githubName}">
-                            <button onclick="addComment('\${user.githubName}')">💬</button>
-                        </div>
-                        <div class="comment-list" id="commentList_\${user.githubName}">\`;
-            
-            // 현재 월의 댓글만 표시
-            const monthKey = \`\${currentYear}-\${currentMonth}\`;
-            const userComments = (comments[monthKey] && comments[monthKey][user.githubName]) || [];
-            userComments.forEach(comment => {
-                html += \`<div class="comment-item" style="background-color: \${getGrassColor(user.colorPosition, 0.05)};">
-                    <span class="comment-author">@\${comment.author}:</span> \${comment.text}
-                </div>\`;
+        
+        function updateColor(githubName, colorHue) {
+            vscode.postMessage({ 
+                command: 'updateColor', 
+                githubName, 
+                colorHue: parseInt(colorHue) 
             });
-            
-            html += \`</div>
-                    </div>
-                </div>\`;
-            
-            return html;
         }
-
-        // 모든 사용자 렌더링
-        function renderAllUsers() {
-            const container = document.getElementById('usersContainer');
-            container.innerHTML = users.map(user => renderUser(user)).join('');
-        }
-
-        // 사용자 색상 변경
-        function updateUserColor(githubName, newColorPosition) {
-            const user = users.find(u => u.githubName === githubName);
-            if (user) {
-                user.colorPosition = parseInt(newColorPosition);
-                renderAllUsers();
-            }
-        }
-
-        // 댓글 추가 함수 (한 달 제한)
-        function addComment(targetUser) {
-            const input = document.getElementById(\`commentInput_\${targetUser}\`);
-            const text = input.value.trim();
-            
-            if (text) {
-                // 랜덤 작성자 선택 (타겟이 아닌 사용자 중에서)
-                const authors = users.filter(u => u.githubName !== targetUser);
-                const randomAuthor = authors[Math.floor(Math.random() * authors.length)];
-                
-                const monthKey = \`\${currentYear}-\${currentMonth}\`;
-                if (!comments[monthKey]) {
-                    comments[monthKey] = {};
-                }
-                if (!comments[monthKey][targetUser]) {
-                    comments[monthKey][targetUser] = [];
-                }
-                
-                comments[monthKey][targetUser].push({
-                    author: randomAuthor.githubName,
-                    text: text,
-                    date: new Date()
-                });
-                
-                input.value = '';
-                renderAllUsers();
-            }
-        }
-
-        // 전역 변수로 함수들 노출
-        window.changeMonth = changeMonth;
-        window.updateUserColor = updateUserColor;
-        window.addComment = addComment;
-
-        // 초기 렌더링
-        renderAllUsers();
     </script>
 </body>
 </html>`;
     }
+    
+    renderMember(member) {
+        const totalCommits = member.commitData.reduce((sum, day) => sum + day.count, 0);
+        const activeDays = member.commitData.filter(day => day.count > 0).length;
+        const maxCommits = Math.max(...member.commitData.map(day => day.count));
+        
+        const calendarCells = member.commitData.map((day, index) => {
+            const intensity = maxCommits > 0 ? day.count / maxCommits : 0;
+            const opacity = 0.1 + (intensity * 0.9);
+            const color = `hsl(${member.colorHue}, 70%, 50%)`;
+            
+            return `<div class="day" style="background-color: ${color}; opacity: ${opacity};" 
+                title="${day.date}: ${day.count}회 커밋"></div>`;
+        }).join('');
+        
+        return `
+            <div class="member-card">
+                <div class="member-header">
+                    <div class="member-name">${member.displayName}</div>
+                    <div class="stats">📈 ${totalCommits}회 • 🔥 ${activeDays}일 • 🏆 최고 ${maxCommits}회</div>
+                </div>
+                
+                <div class="calendar">${calendarCells}</div>
+                
+                <div class="color-control">
+                    <span>색상:</span>
+                    <input type="range" class="color-slider" min="0" max="360" value="${member.colorHue}" 
+                           onchange="updateColor('${member.githubName}', this.value)">
+                    <div class="color-preview" style="background-color: hsl(${member.colorHue}, 70%, 50%);"></div>
+                </div>
+            </div>
+        `;
+    }
+    
+    getNonce() {
+        let text = '';
+        const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+        for (let i = 0; i < 32; i++) {
+            text += possible.charAt(Math.floor(Math.random() * possible.length));
+        }
+        return text;
+    }
 }
+
+// viewType static 속성 추가
+TeamGrassProvider.viewType = 'teamGrassTrackerView';
+
+// Extension activation
+async function activate(context) {
+    const logger = new Logger('TeamGrassTracker');
+    const configManager = new ConfigurationManager();
+    const gitService = new GitService(logger);
+    
+    // WebView Provider 등록
+    const provider = new TeamGrassProvider(context.extensionUri, configManager, gitService, logger);
+    
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(TeamGrassProvider.viewType, provider),
+        
+        // Commands
+        vscode.commands.registerCommand('teamGrassTracker.refresh', () => provider.refresh()),
+        vscode.commands.registerCommand('teamGrassTracker.addMember', () => provider.addMember()),
+        vscode.commands.registerCommand('teamGrassTracker.selectRepository', () => provider.selectRepository()),
+        vscode.commands.registerCommand('teamGrassTracker.attendanceCheck', () => provider.showAttendance()),
+        
+        // Configuration watcher
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('teamGrassTracker')) {
+                provider.refresh();
+            }
+        })
+    );
+    
+    logger.info('Team Grass Tracker activated successfully');
+}
+
+function deactivate() {}
 
 module.exports = {
     activate,

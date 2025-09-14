@@ -1,17 +1,58 @@
 {
   "name": "team-grass-tracker",
-  "displayName": "Team Grass Tracker",
-  "description": "Visual commit tracking for team algorithm problem solving competition",
-  "version": "0.0.1",
+  "displayName": "🌱 Team Grass Tracker",
+  "description": "Git 커밋 기반 팀 잔디 시각화 도구",
+  "version": "2.0.0",
+  "publisher": "your-publisher",
   "engines": {
     "vscode": "^1.74.0"
   },
-  "categories": [
-    "Other"
+  "categories": ["Other"],
+  "keywords": ["git", "commit", "visualization", "team", "grass"],
+  "activationEvents": [
+    "onView:teamGrassTrackerView"
   ],
-  "activationEvents": [],
   "main": "./extension.js",
   "contributes": {
+    "configuration": {
+      "title": "Team Grass Tracker",
+      "properties": {
+        "teamGrassTracker.teamTitle": {
+          "type": "string",
+          "default": "Team Grass Tracker",
+          "description": "팀 제목"
+        },
+        "teamGrassTracker.teamMembers": {
+          "type": "array",
+          "default": [],
+          "description": "팀 멤버 목록",
+          "items": {
+            "type": "object",
+            "properties": {
+              "githubName": {
+                "type": "string",
+                "description": "GitHub 사용자명"
+              },
+              "displayName": {
+                "type": "string",
+                "description": "표시할 이름"
+              },
+              "colorHue": {
+                "type": "number",
+                "description": "색상 (0-360)",
+                "minimum": 0,
+                "maximum": 360
+              }
+            }
+          }
+        },
+        "teamGrassTracker.targetRepository": {
+          "type": "string",
+          "default": "",
+          "description": "대상 저장소 경로"
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -25,33 +66,55 @@
       "teamGrassTracker": [
         {
           "id": "teamGrassTrackerView",
-          "name": "🌱 잔디 달력",
-          "type": "webview"
+          "name": "🌱 팀 잔디",
+          "type": "webview",
+          "icon": "$(calendar)"
         }
       ]
     },
     "commands": [
       {
         "command": "teamGrassTracker.refresh",
-        "title": "🔄 Refresh Grass Calendar"
+        "title": "새로고침",
+        "icon": "$(refresh)"
       },
       {
-        "command": "teamGrassTracker.show",
-        "title": "🌱 Show Team Grass Tracker"
+        "command": "teamGrassTracker.addMember",
+        "title": "팀원 추가",
+        "icon": "$(person-add)"
+      },
+      {
+        "command": "teamGrassTracker.selectRepository",
+        "title": "저장소 선택",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "teamGrassTracker.attendanceCheck",
+        "title": "출석체크",
+        "icon": "$(checklist)"
       }
-    ]
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "teamGrassTracker.refresh",
+          "when": "view == teamGrassTrackerView",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
-    "vscode:prepublish": "echo 'No build required'",
-    "compile": "echo 'No build required'",
-    "watch": "echo 'No build required'"
+    "vscode:prepublish": "echo 'Extension ready'",
+    "compile": "echo 'No compilation needed'",
+    "watch": "echo 'No watch needed'"
   },
   "devDependencies": {
-    "@types/node": "16.x",
     "@types/vscode": "^1.74.0",
+    "@types/node": "16.x",
+    "@typescript-eslint/eslint-plugin": "^5.45.0",
+    "@typescript-eslint/parser": "^5.45.0",
+    "eslint": "^8.28.0",
     "typescript": "^4.9.4"
-  },
-  "dependencies": {
-    "@types/vscode": "^1.74.0"
   }
 }
