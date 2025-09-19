@@ -27,7 +27,11 @@
   "homepage": "https://github.com/shfkswhd/team_grass_tracker#readme",
   "license": "MIT",
   "activationEvents": [
-    "*"
+    "onView:teamGrassTrackerView",
+    "onCommand:teamGrassTracker.refresh",
+    "onCommand:teamGrassTracker.addMember",
+    "onCommand:teamGrassTracker.selectRepository",
+    "onCommand:teamGrassTracker.attendanceCheck"
   ],
   "main": "./extension.js",
   "contributes": {

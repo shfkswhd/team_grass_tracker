@@ -209,13 +209,16 @@ class GitService {
 
 // Team Grass Provider 클래스
 class TeamGrassProvider {
-    constructor(extensionUri, configManager, gitService, logger) {
+    constructor(extensionUri, configManager, gitService, logger, context) {
         this.extensionUri = extensionUri;
         this.configManager = configManager;
         this.gitService = gitService;
         this.logger = logger;
+        this.context = context;
         this.currentYear = new Date().getFullYear();
         this.currentMonth = new Date().getMonth() + 1;
+        this._midnightTimer = null;
+        this.scheduleMidnightRefresh();
     }
     
     resolveWebviewView(webviewView, context, token) {
@@ -324,6 +327,8 @@ class TeamGrassProvider {
         const members = this.configManager.teamMembers;
         const repo = this.configManager.targetRepository;
         const title = this.configManager.teamTitle;
+        const todayKey = this.getTodayKey();
+        const commentsByMember = this.getCommentsForDate(todayKey);
         
         const membersWithData = await Promise.all(
             members.map(async member => ({
@@ -337,7 +342,7 @@ class TeamGrassProvider {
             }))
         );
         
-        this._view.webview.html = this.getHtmlForWebview(membersWithData, repo, title);
+        this._view.webview.html = this.getHtmlForWebview(membersWithData, repo, title, commentsByMember);
     }
     
     handleMessage(message) {
@@ -381,6 +386,25 @@ class TeamGrassProvider {
                     }
                 })();
                 break;
+            case 'addComment':
+                (async () => {
+                    try {
+                        const todayKey = this.getTodayKey();
+                        const all = this.context.globalState.get('dailyComments', {});
+                        const dateBucket = all[todayKey] || {};
+                        const memberKey = message.key?.authorEmail || message.key?.githubName || 'unknown';
+                        const list = dateBucket[memberKey] || [];
+                        list.push(message.text);
+                        dateBucket[memberKey] = list;
+                        all[todayKey] = dateBucket;
+                        await this.context.globalState.update('dailyComments', all);
+                        this.refresh();
+                    } catch (err) {
+                        this.logger.error('Failed to add comment', err);
+                        vscode.window.showErrorMessage('댓글 저장 중 오류가 발생했습니다.');
+                    }
+                })();
+                break;
             case 'removeMember':
                 (async () => {
                     try {
@@ -395,8 +419,35 @@ class TeamGrassProvider {
                 break;
         }
     }
+
+    getTodayKey() {
+        const d = new Date();
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+    }
     
-    getHtmlForWebview(members, repo, title) {
+    getCommentsForDate(dateKey) {
+        const all = this.context.globalState.get('dailyComments', {});
+        return all[dateKey] || {};
+    }
+    
+    scheduleMidnightRefresh() {
+        if (this._midnightTimer) {
+            clearTimeout(this._midnightTimer);
+        }
+        const now = new Date();
+        const next = new Date(now);
+        next.setHours(24, 0, 0, 0); // 다음 자정
+        const ms = next.getTime() - now.getTime();
+        this._midnightTimer = setTimeout(() => {
+            this.refresh();
+            this.scheduleMidnightRefresh();
+        }, ms);
+    }
+    
+    getHtmlForWebview(members, repo, title, commentsByMember) {
         const nonce = this.getNonce();
         
         return `<!DOCTYPE html>
@@ -526,6 +577,18 @@ class TeamGrassProvider {
             padding: 40px 20px;
             color: var(--vscode-descriptionForeground);
         }
+
+        .comments {
+            margin-top: 10px;
+            border-top: 1px dashed var(--vscode-panel-border);
+            padding-top: 10px;
+        }
+        .comments-title { font-weight: bold; margin-bottom: 6px; }
+        .comment-list { list-style: none; padding-left: 0; margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
+        .comment-item { font-size: 12px; color: var(--vscode-foreground); background: var(--vscode-editor-inactiveSelectionBackground); padding: 6px; border-radius: 4px; }
+        .comment-input { display: flex; gap: 6px; }
+        .comment-input input[type="text"] { flex: 1; padding: 6px; border-radius: 4px; border: 1px solid var(--vscode-panel-border); background: var(--vscode-editor-background); color: var(--vscode-foreground); }
+        .comment-input .btn { padding: 6px 10px; }
     </style>
 </head>
 <body>
@@ -557,7 +620,7 @@ class TeamGrassProvider {
             <div>일</div><div>월</div><div>화</div><div>수</div><div>목</div><div>금</div><div>토</div>
         </div>
         
-        ${members.map(member => this.renderMember(member)).join('')}
+        ${members.map(member => this.renderMember(member, commentsByMember)).join('')}
     `}
     
     <script nonce="${nonce}">
@@ -593,7 +656,7 @@ class TeamGrassProvider {
             });
         }
 
-        // Attach event listeners to avoid inline handlers blocked by CSP
+    // Attach event listeners to avoid inline handlers blocked by CSP
         (function init() {
             const $ = (id) => document.getElementById(id);
             const safe = (el, type, fn) => el && el.addEventListener(type, fn);
@@ -625,13 +688,29 @@ class TeamGrassProvider {
                     vscode.postMessage({ command: 'requestRemoveMember', key });
                 });
             });
+
+            document.querySelectorAll('.add-comment').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const target = e.currentTarget;
+                    const container = target.closest('.comments');
+                    const input = container.querySelector('input[type="text"]');
+                    const text = (input?.value || '').trim();
+                    if (!text) return;
+                    const key = {
+                        authorEmail: target.getAttribute('data-author-email') || undefined,
+                        githubName: target.getAttribute('data-github-name') || undefined
+                    };
+                    vscode.postMessage({ command: 'addComment', key, text });
+                    input.value = '';
+                });
+            });
         })();
     </script>
 </body>
 </html>`;
     }
     
-    renderMember(member) {
+    renderMember(member, commentsByMember) {
         const totalCommits = member.commitData.reduce((sum, day) => sum + day.count, 0);
         const activeDays = member.commitData.filter(day => day.count > 0).length;
         const maxCommits = Math.max(...member.commitData.map(day => day.count));
@@ -645,6 +724,12 @@ class TeamGrassProvider {
                 title="${day.date}: ${day.count}회 커밋"></div>`;
         }).join('');
         
+        const keyId = member.authorEmail || member.githubName || 'unknown';
+        const comments = (commentsByMember && commentsByMember[keyId]) || [];
+        const commentsHtml = comments.length > 0
+            ? `<ul class="comment-list">${comments.map(c => `<li class="comment-item">${c}</li>`).join('')}</ul>`
+            : `<div class="comment-empty" style="color: var(--vscode-descriptionForeground); font-size: 12px;">아직 댓글이 없습니다. 첫 댓글을 남겨보세요!</div>`;
+
         return `
             <div class="member-card">
                 <div class="member-header">
@@ -664,6 +749,15 @@ class TeamGrassProvider {
                     <span>색상:</span>
                     <input type="range" class="color-slider" min="0" max="360" value="${member.colorHue}" data-github-name="${member.githubName || ''}" data-author-email="${member.authorEmail || ''}">
                     <div class="color-preview" style="background-color: hsl(${member.colorHue}, 70%, 50%);"></div>
+                </div>
+
+                <div class="comments">
+                    <div class="comments-title">💬 오늘의 댓글</div>
+                    ${commentsHtml}
+                    <div class="comment-input" style="margin-top: 6px;">
+                        <input type="text" placeholder="오늘의 한마디를 남겨주세요" />
+                        <button class="btn add-comment" data-author-email="${member.authorEmail || ''}" data-github-name="${member.githubName || ''}">등록</button>
+                    </div>
                 </div>
             </div>
         `;
@@ -689,7 +783,7 @@ async function activate(context) {
     const gitService = new GitService(logger);
     
     // WebView Provider 등록
-    const provider = new TeamGrassProvider(context.extensionUri, configManager, gitService, logger);
+    const provider = new TeamGrassProvider(context.extensionUri, configManager, gitService, logger, context);
     
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(TeamGrassProvider.viewType, provider),
