@@ -390,14 +390,27 @@ class TeamGrassProvider {
                 (async () => {
                     try {
                         const todayKey = this.getTodayKey();
-                        const all = this.context.globalState.get('dailyComments', {});
-                        const dateBucket = all[todayKey] || {};
                         const memberKey = message.key?.authorEmail || message.key?.githubName || 'unknown';
-                        const list = dateBucket[memberKey] || [];
-                        list.push(message.text);
-                        dateBucket[memberKey] = list;
-                        all[todayKey] = dateBucket;
-                        await this.context.globalState.update('dailyComments', all);
+                        const repo = this.configManager.targetRepository;
+
+                        // If repo is set, sync to JSON file inside the repo; otherwise fallback to globalState
+                        if (repo && this.gitService.isValidRepository(repo)) {
+                            const all = this.readCommentsFile();
+                            const dateBucket = all[todayKey] || {};
+                            const list = dateBucket[memberKey] || [];
+                            list.push(message.text);
+                            dateBucket[memberKey] = list;
+                            all[todayKey] = dateBucket;
+                            this.writeCommentsFile(all);
+                        } else {
+                            const all = this.context.globalState.get('dailyComments', {});
+                            const dateBucket = all[todayKey] || {};
+                            const list = dateBucket[memberKey] || [];
+                            list.push(message.text);
+                            dateBucket[memberKey] = list;
+                            all[todayKey] = dateBucket;
+                            await this.context.globalState.update('dailyComments', all);
+                        }
                         this.refresh();
                     } catch (err) {
                         this.logger.error('Failed to add comment', err);
@@ -429,8 +442,17 @@ class TeamGrassProvider {
     }
     
     getCommentsForDate(dateKey) {
-        const all = this.context.globalState.get('dailyComments', {});
-        return all[dateKey] || {};
+        try {
+            const repo = this.configManager.targetRepository;
+            if (repo && this.gitService.isValidRepository(repo)) {
+                const all = this.readCommentsFile();
+                return all[dateKey] || {};
+            }
+        } catch (err) {
+            this.logger.warn('Falling back to local comments due to read error', err?.message || err);
+        }
+        const localAll = this.context.globalState.get('dailyComments', {});
+        return localAll[dateKey] || {};
     }
     
     scheduleMidnightRefresh() {
@@ -449,6 +471,7 @@ class TeamGrassProvider {
     
     getHtmlForWebview(members, repo, title, commentsByMember) {
         const nonce = this.getNonce();
+        const syncLabel = repo ? '• ☁ 댓글 동기화 켜짐' : '• ☁ 댓글 동기화 꺼짐';
         
         return `<!DOCTYPE html>
 <html lang="ko">
@@ -594,7 +617,7 @@ class TeamGrassProvider {
 <body>
     <div class="header">
         <h2>${title}</h2>
-        <div class="stats">📂 ${repo ? path.basename(repo) : '저장소 미설정'} • 👥 ${members.length}명</div>
+        <div class="stats">📂 ${repo ? path.basename(repo) : '저장소 미설정'} • 👥 ${members.length}명 ${syncLabel}</div>
     </div>
     
     <div class="controls">
@@ -770,6 +793,49 @@ class TeamGrassProvider {
             text += possible.charAt(Math.floor(Math.random() * possible.length));
         }
         return text;
+    }
+
+    // ====== Comment Sync Helpers (Repo JSON) ======
+    getCommentsFilePath() {
+        const repo = this.configManager.targetRepository;
+        if (!repo || !this.gitService.isValidRepository(repo)) return undefined;
+        return path.join(repo, '.vscode', 'team-grass-comments.json');
+    }
+
+    ensureCommentsDir() {
+        const repo = this.configManager.targetRepository;
+        if (!repo || !this.gitService.isValidRepository(repo)) return;
+        const dir = path.join(repo, '.vscode');
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+    }
+
+    readCommentsFile() {
+        const filePath = this.getCommentsFilePath();
+        if (!filePath) return {};
+        try {
+            if (!fs.existsSync(filePath)) return {};
+            const txt = fs.readFileSync(filePath, 'utf8');
+            if (!txt.trim()) return {};
+            const data = JSON.parse(txt);
+            return (data && typeof data === 'object') ? data : {};
+        } catch (err) {
+            this.logger.error('Failed to read comments file', err);
+            return {};
+        }
+    }
+
+    writeCommentsFile(all) {
+        const filePath = this.getCommentsFilePath();
+        if (!filePath) return;
+        try {
+            this.ensureCommentsDir();
+            fs.writeFileSync(filePath, JSON.stringify(all, null, 2), 'utf8');
+        } catch (err) {
+            this.logger.error('Failed to write comments file', err);
+            vscode.window.showWarningMessage('댓글 동기화 파일 저장에 실패했습니다. 로컬 저장소를 사용합니다.');
+        }
     }
 }
 
