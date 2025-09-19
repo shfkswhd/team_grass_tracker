@@ -1,0 +1,17 @@
+{
+    "teamGrassTracker.teamMembers": [
+        {
+            "authorEmail": "",
+            "githubName": "Junnnny",
+            "displayName": "조원준",
+            "colorHue": 200
+        },
+        {
+            "authorEmail": "",
+            "githubName": "shfkswhd",
+            "displayName": "박민수",
+            "colorHue": 175
+        }
+    ],
+    "teamGrassTracker.targetRepository": "c:\\Users\\a0109\\Desktop\\Algorithm"
+}
