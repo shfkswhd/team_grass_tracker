@@ -2,7 +2,7 @@
   "name": "team-grass-tracker",
   "displayName": "🌱 Team Grass Tracker",
   "description": "Git 커밋 기반 팀 잔디 시각화 도구",
-  "version": "2.0.2",
+  "version": "2.0.1",
   "publisher": "junnnny",
   "engines": {
     "vscode": "^1.74.0"
