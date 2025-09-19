@@ -29,9 +29,13 @@
           "items": {
             "type": "object",
             "properties": {
+              "authorEmail": {
+                "type": "string",
+                "description": "커밋에 찍히는 이메일 (권장)"
+              },
               "githubName": {
                 "type": "string",
-                "description": "GitHub 사용자명"
+                "description": "GitHub 사용자명 (선택, 이메일 미입력 시 사용)"
               },
               "displayName": {
                 "type": "string",

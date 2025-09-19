@@ -52,6 +52,11 @@ class ConfigurationManager {
         this.CONFIG_SECTION = 'teamGrassTracker';
     }
     
+    getTarget() {
+        const hasWorkspace = Array.isArray(vscode.workspace.workspaceFolders) && vscode.workspace.workspaceFolders.length > 0;
+        return hasWorkspace ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+    }
+    
     get teamMembers() {
         return vscode.workspace.getConfiguration(this.CONFIG_SECTION).get('teamMembers', []);
     }
@@ -76,19 +81,39 @@ class ConfigurationManager {
         await this.updateMembers(members);
     }
     
+    async updateMemberByKey(key, updates) {
+        const { authorEmail, githubName } = key || {};
+        const members = this.teamMembers.map(m => {
+            const match = (authorEmail && m.authorEmail && m.authorEmail === authorEmail)
+                || (githubName && m.githubName && m.githubName === githubName);
+            return match ? { ...m, ...updates } : m;
+        });
+        await this.updateMembers(members);
+    }
+    
     async removeMember(githubName) {
         const members = this.teamMembers.filter(m => m.githubName !== githubName);
         await this.updateMembers(members);
     }
     
+    async removeMemberByKey(key) {
+        const { authorEmail, githubName } = key || {};
+        const members = this.teamMembers.filter(m => {
+            const matchEmail = authorEmail && m.authorEmail && m.authorEmail === authorEmail;
+            const matchGithub = githubName && m.githubName && m.githubName === githubName;
+            return !(matchEmail || matchGithub);
+        });
+        await this.updateMembers(members);
+    }
+    
     async setRepository(repoPath) {
         await vscode.workspace.getConfiguration(this.CONFIG_SECTION)
-            .update('targetRepository', repoPath, vscode.ConfigurationTarget.Workspace);
+            .update('targetRepository', repoPath, this.getTarget());
     }
     
     async updateMembers(members) {
         await vscode.workspace.getConfiguration(this.CONFIG_SECTION)
-            .update('teamMembers', members, vscode.ConfigurationTarget.Workspace);
+            .update('teamMembers', members, this.getTarget());
     }
 }
 
@@ -213,46 +238,55 @@ class TeamGrassProvider {
     }
     
     async addMember() {
-        const githubName = await vscode.window.showInputBox({
-            prompt: 'GitHub 사용자명을 입력하세요',
-            placeHolder: 'github-username'
-        });
-        
-        if (!githubName) return;
-        
-        const displayName = await vscode.window.showInputBox({
-            prompt: '표시할 이름을 입력하세요',
-            placeHolder: '홍길동',
-            value: githubName
-        });
-        
-        if (!displayName) return;
-        
-        const colorHue = Math.floor(Math.random() * 360);
-        
-        await this.configManager.addMember({
-            githubName,
-            displayName,
-            colorHue
-        });
-        
-        vscode.window.showInformationMessage(`✅ ${displayName}님이 팀에 추가되었습니다!`);
-        this.refresh();
+        try {
+            const authorEmail = await vscode.window.showInputBox({
+                prompt: '커밋에 찍히는 이메일을 입력하세요 (권장)',
+                placeHolder: 'name@example.com',
+                validateInput: (v) => (!v || /.+@.+\..+/.test(v)) ? undefined : '올바른 이메일 형식이 아닙니다.'
+            });
+
+            const githubName = await vscode.window.showInputBox({
+                prompt: 'GitHub 사용자명 (선택, 이메일 미입력 시 사용)',
+                placeHolder: 'github-username'
+            });
+            if (!authorEmail && !githubName) return; // 하나는 있어야 함
+
+            const displayName = await vscode.window.showInputBox({
+                prompt: '표시할 이름을 입력하세요',
+                placeHolder: '홍길동',
+                value: githubName || (authorEmail ? authorEmail.split('@')[0] : '')
+            });
+            if (!displayName) return;
+
+            const colorHue = Math.floor(Math.random() * 360);
+
+            await this.configManager.addMember({ authorEmail, githubName, displayName, colorHue });
+
+            vscode.window.showInformationMessage(`✅ ${displayName}님이 팀에 추가되었습니다!`);
+            this.refresh();
+        } catch (err) {
+            this.logger.error('Failed to add member', err);
+            vscode.window.showErrorMessage('팀원을 저장하는 중 오류가 발생했습니다. 워크스페이스를 열었는지 확인하거나 설정 동기화를 확인하세요.');
+        }
     }
     
     async selectRepository() {
-        const folders = await vscode.window.showOpenDialog({
-            canSelectFiles: false,
-            canSelectFolders: true,
-            canSelectMany: false,
-            openLabel: 'Git 저장소 선택'
-        });
-        
-        if (folders && folders.length > 0) {
+        try {
+            const folders = await vscode.window.showOpenDialog({
+                canSelectFiles: false,
+                canSelectFolders: true,
+                canSelectMany: false,
+                openLabel: 'Git 저장소 선택'
+            });
+            if (!folders || folders.length === 0) return;
+
             const selectedPath = folders[0].fsPath;
             await this.configManager.setRepository(selectedPath);
             vscode.window.showInformationMessage(`저장소가 설정되었습니다: ${path.basename(selectedPath)}`);
             this.refresh();
+        } catch (err) {
+            this.logger.error('Failed to set repository', err);
+            vscode.window.showErrorMessage('저장소 설정 중 오류가 발생했습니다. 워크스페이스를 열었는지 확인해주세요.');
         }
     }
     
@@ -270,7 +304,8 @@ class TeamGrassProvider {
         
         for (const member of members) {
             try {
-                const commits = await this.gitService.getCommitData(repo, member.githubName, 
+                const author = member.authorEmail || member.githubName;
+                const commits = await this.gitService.getCommitData(repo, author, 
                     new Date().getFullYear(), new Date().getMonth() + 1);
                 const todayCommits = commits.find(c => c.date === today)?.count || 0;
                 
@@ -293,7 +328,12 @@ class TeamGrassProvider {
         const membersWithData = await Promise.all(
             members.map(async member => ({
                 ...member,
-                commitData: await this.gitService.getCommitData(repo, member.githubName, this.currentYear, this.currentMonth)
+                commitData: await this.gitService.getCommitData(
+                    repo,
+                    member.authorEmail || member.githubName,
+                    this.currentYear,
+                    this.currentMonth
+                )
             }))
         );
         
@@ -303,7 +343,7 @@ class TeamGrassProvider {
     handleMessage(message) {
         switch (message.command) {
             case 'updateColor':
-                this.configManager.updateMember(message.githubName, { colorHue: message.colorHue });
+                this.configManager.updateMemberByKey(message.key, { colorHue: message.colorHue });
                 this.refresh();
                 break;
             case 'changeMonth':
@@ -322,6 +362,36 @@ class TeamGrassProvider {
                 break;
             case 'showAttendance':
                 this.showAttendance();
+                break;
+            case 'requestRemoveMember':
+                (async () => {
+                    const label = message.key?.authorEmail || message.key?.githubName || '이 멤버';
+                    const yes = '삭제';
+                    const no = '취소';
+                    const picked = await vscode.window.showWarningMessage(`${label}을(를) 삭제할까요?`, { modal: true }, yes, no);
+                    if (picked === yes) {
+                        try {
+                            await this.configManager.removeMemberByKey(message.key);
+                            vscode.window.showInformationMessage('팀원을 삭제했습니다.');
+                            this.refresh();
+                        } catch (err) {
+                            this.logger.error('Failed to remove member', err);
+                            vscode.window.showErrorMessage('팀원 삭제 중 오류가 발생했습니다.');
+                        }
+                    }
+                })();
+                break;
+            case 'removeMember':
+                (async () => {
+                    try {
+                        await this.configManager.removeMemberByKey(message.key);
+                        vscode.window.showInformationMessage('팀원을 삭제했습니다.');
+                        this.refresh();
+                    } catch (err) {
+                        this.logger.error('Failed to remove member', err);
+                        vscode.window.showErrorMessage('팀원 삭제 중 오류가 발생했습니다.');
+                    }
+                })();
                 break;
         }
     }
@@ -394,13 +464,14 @@ class TeamGrassProvider {
         .member-header {
             display: flex;
             justify-content: space-between;
-            align-items: center;
+            align-items: flex-start;
             margin-bottom: 12px;
+            gap: 8px;
         }
         
-        .member-name {
-            font-weight: bold;
-        }
+        .member-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .member-display { font-weight: bold; }
+        .member-email { color: var(--vscode-descriptionForeground); font-weight: normal; overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
         
         .stats {
             font-size: 11px;
@@ -464,10 +535,10 @@ class TeamGrassProvider {
     </div>
     
     <div class="controls">
-        <button class="btn" onclick="selectRepository()">📁 저장소 선택</button>
-        <button class="btn" onclick="addMember()">👥 팀원 추가</button>
-        <button class="btn" onclick="showAttendance()">📋 출석체크</button>
-        <button class="btn" onclick="refresh()">🔄 새로고침</button>
+        <button class="btn" id="btnSelectRepository">📁 저장소 선택</button>
+        <button class="btn" id="btnAddMember">👥 팀원 추가</button>
+        <button class="btn" id="btnShowAttendance">📋 출석체크</button>
+        <button class="btn" id="btnRefresh">🔄 새로고침</button>
     </div>
     
     ${members.length === 0 ? `
@@ -477,9 +548,9 @@ class TeamGrassProvider {
         </div>
     ` : `
         <div class="month-nav">
-            <button class="btn" onclick="changeMonth(-1)">←</button>
+            <button class="btn" id="btnPrevMonth">←</button>
             <span id="monthDisplay">${this.currentYear}년 ${this.currentMonth}월</span>
-            <button class="btn" onclick="changeMonth(1)">→</button>
+            <button class="btn" id="btnNextMonth">→</button>
         </div>
         
         <div class="calendar-header">
@@ -492,22 +563,11 @@ class TeamGrassProvider {
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         
-        function selectRepository() {
-            vscode.postMessage({ command: 'selectRepository' });
-        }
-        
-        function addMember() {
-            vscode.postMessage({ command: 'addMember' });
-        }
-        
-        function showAttendance() {
-            vscode.postMessage({ command: 'showAttendance' });
-        }
-        
-        function refresh() {
-            vscode.postMessage({ command: 'refresh' });
-        }
-        
+        function selectRepository() { vscode.postMessage({ command: 'selectRepository' }); }
+        function addMember() { vscode.postMessage({ command: 'addMember' }); }
+        function showAttendance() { vscode.postMessage({ command: 'showAttendance' }); }
+        function refresh() { vscode.postMessage({ command: 'refresh' }); }
+
         function changeMonth(direction) {
             let year = ${this.currentYear};
             let month = ${this.currentMonth};
@@ -525,13 +585,47 @@ class TeamGrassProvider {
             vscode.postMessage({ command: 'changeMonth', year, month });
         }
         
-        function updateColor(githubName, colorHue) {
+        function updateColor(key, colorHue) {
             vscode.postMessage({ 
                 command: 'updateColor', 
-                githubName, 
+                key,
                 colorHue: parseInt(colorHue) 
             });
         }
+
+        // Attach event listeners to avoid inline handlers blocked by CSP
+        (function init() {
+            const $ = (id) => document.getElementById(id);
+            const safe = (el, type, fn) => el && el.addEventListener(type, fn);
+
+            safe($("btnSelectRepository"), 'click', selectRepository);
+            safe($("btnAddMember"), 'click', addMember);
+            safe($("btnShowAttendance"), 'click', showAttendance);
+            safe($("btnRefresh"), 'click', refresh);
+            safe($("btnPrevMonth"), 'click', () => changeMonth(-1));
+            safe($("btnNextMonth"), 'click', () => changeMonth(1));
+
+            document.querySelectorAll('.color-slider').forEach(input => {
+                input.addEventListener('change', (e) => {
+                    const target = e.currentTarget;
+                    updateColor({
+                        authorEmail: target.getAttribute('data-author-email') || undefined,
+                        githubName: target.getAttribute('data-github-name') || undefined
+                    }, target.value);
+                });
+            });
+
+            document.querySelectorAll('.remove-member').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    const target = e.currentTarget;
+                    const key = {
+                        authorEmail: target.getAttribute('data-author-email') || undefined,
+                        githubName: target.getAttribute('data-github-name') || undefined
+                    };
+                    vscode.postMessage({ command: 'requestRemoveMember', key });
+                });
+            });
+        })();
     </script>
 </body>
 </html>`;
@@ -554,16 +648,21 @@ class TeamGrassProvider {
         return `
             <div class="member-card">
                 <div class="member-header">
-                    <div class="member-name">${member.displayName}</div>
+                            <div class="member-name">
+                                <div class="member-display">${member.displayName}</div>
+                                ${member.authorEmail ? `<div class="member-email">${member.authorEmail}</div>` : ''}
+                            </div>
                     <div class="stats">📈 ${totalCommits}회 • 🔥 ${activeDays}일 • 🏆 최고 ${maxCommits}회</div>
+                    <div class="member-actions">
+                        <button class="btn btn-danger remove-member" data-author-email="${member.authorEmail || ''}" data-github-name="${member.githubName || ''}">삭제</button>
+                    </div>
                 </div>
                 
                 <div class="calendar">${calendarCells}</div>
                 
                 <div class="color-control">
                     <span>색상:</span>
-                    <input type="range" class="color-slider" min="0" max="360" value="${member.colorHue}" 
-                           onchange="updateColor('${member.githubName}', this.value)">
+                    <input type="range" class="color-slider" min="0" max="360" value="${member.colorHue}" data-github-name="${member.githubName || ''}" data-author-email="${member.authorEmail || ''}">
                     <div class="color-preview" style="background-color: hsl(${member.colorHue}, 70%, 50%);"></div>
                 </div>
             </div>
