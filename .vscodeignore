@@ -1,0 +1,12 @@
+.git/**
+**/*.ts
+**/*.map
+node_modules/**
+.vscode/**
+Minsu/**
+Wonjun/**
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg

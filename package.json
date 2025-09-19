@@ -3,12 +3,21 @@
   "displayName": "🌱 Team Grass Tracker",
   "description": "Git 커밋 기반 팀 잔디 시각화 도구",
   "version": "2.0.0",
-  "publisher": "your-publisher",
+  "publisher": "junnnny",
   "engines": {
     "vscode": "^1.74.0"
   },
   "categories": ["Other"],
   "keywords": ["git", "commit", "visualization", "team", "grass"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shfkswhd/team_grass_tracker.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shfkswhd/team_grass_tracker/issues"
+  },
+  "homepage": "https://github.com/shfkswhd/team_grass_tracker#readme",
+  "license": "MIT",
   "activationEvents": [
     "onView:teamGrassTrackerView"
   ],
